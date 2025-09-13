@@ -1,0 +1,5 @@
+/.envrc
+/.direnv/
+/.nix-mix/
+/.elixir_ls/
+/.erlang-history/
