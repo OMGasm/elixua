@@ -65,9 +65,11 @@ defmodule Tokeniser do
       :token -> val
       :num -> val
       :num_hex -> "0x#{val}"
-      :shebang -> val
+      :shebang -> "#!#{val}"
       :string_sq -> "'#{val}'"
       :string_dq -> ~s("#{val}")
+      :comment -> "--#{val}"
+      :comment_dsq -> "--[[#{val}]]"
     end
   end
 
@@ -107,7 +109,7 @@ defmodule Tokeniser do
   def tok(%Ctx{str: <<"#!", shebang::binary>>, line: 1, pos: 1} = ctx) do
     len = String.length(shebang)
     shebang = String.slice(shebang, 0, len - 1)
-    tok_ok(:shebang, shebang, ctx, len)
+    tok_ok(:shebang, shebang, ctx, len + 1)
   end
 
   # keywords
@@ -166,6 +168,32 @@ defmodule Tokeniser do
     tok_ok(:num, num, ctx)
   end
 
+  # comments
+  def tok(%Ctx{str: <<"--[[", _::binary>>} = ctx) do
+    res =
+      ctx
+      |> Ctx.next(4)
+      |> delimited("", "]]", :multiline)
+
+    case res do
+      {:ok, comment, ctx2} ->
+        {
+          :ok,
+          Token.new(:comment_dsq, comment, ctx.line, ctx.pos),
+          ctx2
+        }
+
+      {:notfound, partial, ctx} ->
+        {:err, :unclosed, partial, ctx}
+    end
+  end
+
+  def tok(%Ctx{str: <<"--", rest::binary>>} = ctx) do
+    len = String.length(rest)
+    comment = String.slice(rest, 0, len - 1)
+    tok_ok(:comment, comment, ctx, len + 1)
+  end
+
   # tokens
   def tok(%Ctx{str: <<"...", _::binary>>} = ctx) do
     tok_ok(:token, "...", ctx)
@@ -192,8 +220,31 @@ defmodule Tokeniser do
   # string literal
   def tok(%Ctx{str: <<q, _::binary>>} = ctx)
       when q in @quote do
-    {:ok, str, ctx} = str_literal(Ctx.next(ctx), "", q)
-    tok_ok(str_literal_type(q), str, ctx, 0)
+    {:ok, str, _} =
+      ctx
+      |> Ctx.next()
+      |> delimited("", q, :singleline)
+
+    tok_ok(str_literal_type(q), str, ctx, String.length(str) + 2)
+  end
+
+  # empty multiline string literal
+  def tok(%Ctx{str: <<"[[]]">>} = ctx) do
+    tok_ok(:string_multiline, "", ctx, 4)
+  end
+
+  # multiline string literal
+  def tok(%Ctx{str: <<"[[", _::binary>>, line: line, pos: pos} = ctx) do
+    {:ok, str, ctx} =
+      ctx
+      |> Ctx.next(2)
+      |> delimited("", "]]", :multiline)
+
+    {
+      :ok,
+      Token.new(:string_multiline, str, line, pos),
+      ctx
+    }
   end
 
   # EOL
@@ -253,6 +304,53 @@ defmodule Tokeniser do
     case q do
       ?' -> :string_sq
       ?" -> :string_dq
+    end
+  end
+
+  def delimited(ctx, body, delim, mode)
+
+  def delimited(%Ctx{str: <<delim::binary-size(2), _::binary>>} = ctx, body, delim, _) do
+    {:ok, body, Ctx.next(ctx, 2)}
+  end
+
+  def delimited(%Ctx{str: <<delim::binary>>} = ctx, body, delim, _) do
+    {:ok, body, Ctx.next(ctx, delim)}
+  end
+
+  def delimited(%Ctx{str: <<delim, _::binary>>} = ctx, body, delim, _) do
+    {:ok, body, Ctx.next(ctx)}
+  end
+
+  def delimited(%Ctx{str: "\n"} = ctx, body, delim, :multiline) do
+    ctx
+    |> Ctx.next(:line)
+    |> delimited(body <> "\n", delim, :multiline)
+  end
+
+  def delimited(%Ctx{str: <<c, _::binary>>} = ctx, body, delim, mode) do
+    delimited(Ctx.next(ctx), body <> <<c>>, delim, mode)
+  end
+
+  def delimited(%Ctx{str: "\n"} = ctx, body, _, :singleline) do
+    {:notfound, body, ctx}
+  end
+
+  def delimited(%Ctx{str: ""} = ctx, body, _, _) do
+    {:notfound, body, ctx}
+  end
+
+  def delimited_escaped(ctx, body, delim, mode) do
+    res = delimited(ctx, body, delim, mode)
+
+    case res do
+      {:ok, partial, ctx2} ->
+        case String.slice(partial, -1, 1) do
+          "\\" -> delimited_escaped(ctx2, body <> partial <> delim, delim, mode)
+          _ -> res
+        end
+
+      _ ->
+        res
     end
   end
 
