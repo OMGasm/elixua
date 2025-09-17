@@ -9,22 +9,30 @@ defmodule Token do
 end
 
 defmodule Ctx do
-  @enforce_keys [:str, :line, :pos]
-  defstruct [:str, :line, :pos]
+  @enforce_keys [:str, :line, :pos, :stream]
+  defstruct [:str, :line, :pos, :stream]
 
   def next(ctx, chars \\ 1)
 
   def next(%Ctx{} = ctx, chars) when is_integer(chars) do
-    <<_::binary-size(chars), rest::binary>> = ctx.str
-    %{ctx | str: rest, pos: ctx.pos + chars}
+    str = String.slice(ctx.str, chars..-1//1)
+    %{ctx | str: str, pos: ctx.pos + chars}
   end
 
   def next(%Ctx{} = ctx, chars) when is_binary(chars) do
     next(ctx, String.length(chars))
   end
 
-  def new({str, line}) do
-    %Ctx{str: str, line: line, pos: 1}
+  def next(%Ctx{} = ctx, :line) do
+    case Enum.take(ctx.stream, 1) do
+      [str] -> %{ctx | str: str, line: ctx.line + 1, pos: 1}
+      [] -> %{ctx | str: ""}
+    end
+  end
+
+  def new(stream) do
+    [str] = Enum.take(stream, 1)
+    %Ctx{str: str, line: 1, pos: 1, stream: stream}
   end
 end
 
@@ -36,15 +44,14 @@ defmodule Tokeniser do
   @doc """
   foo
   """
-  def tokenise(str) do
-    Stream.with_index(str, 1)
-    |> Stream.map(&token_iterate(Ctx.new(&1)))
+  def tokenise(stream) do
+    stream
+    |> Ctx.new()
+    |> token_iterate()
   end
 
-  def reconstruct(str) do
-    Enum.map(str, &Function.identity/1)
-    |> Enum.reduce(fn a, c -> c ++ a end)
-    |> Enum.map(&dbg/1)
+  def reconstruct(tokens) do
+    tokens
     |> Enum.map(&recon/1)
     |> Enum.map(&IO.write/1)
   end
@@ -66,8 +73,9 @@ defmodule Tokeniser do
 
   def token_iterate(ctx) do
     case(tok(ctx)) do
-      {:ok, %Token{type: :EOL} = token, _} -> [token]
+      {:ok, %Token{type: :EOL} = token, _} -> [token] ++ token_iterate(Ctx.next(ctx, :line))
       {:ok, %Token{} = token, ctx} -> [token] ++ token_iterate(ctx)
+      {:EOF, _, _} -> []
     end
   end
 
@@ -193,6 +201,11 @@ defmodule Tokeniser do
     tok_ok(:EOL, "\n", ctx)
   end
 
+  # EOF
+  def tok(%Ctx{str: ""} = ctx) do
+    {:EOF, nil, ctx}
+  end
+
   def tok(%Ctx{str: <<sp, _::binary>>} = ctx)
       when sp in @spaces do
     tok_ok(:space, <<sp>>, ctx)
@@ -251,4 +264,3 @@ System.argv()
 |> Enum.map(fn x -> File.open!(x) |> IO.stream(:line) end)
 |> Enum.map(&Tokeniser.tokenise/1)
 |> Enum.map(&Tokeniser.reconstruct/1)
-|> Enum.map(&Stream.run/1)
